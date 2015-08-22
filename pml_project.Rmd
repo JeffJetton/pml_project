@@ -1,0 +1,219 @@
+# Practical Machine Learning Project
+Jeff Jetton  
+  
+-------  
+  
+## Summary
+In an attempt to predict the class of exercise movement based on sensor data input, the training set of sensor data was (after some cleaning) split into a training set and an additional cross-validation "hold out" set. Models were developed and tested primarily using the training set, with a final accuracy estimate confirmed with the hold-out set.  
+
+A random forest model was found to yield the highest estimated accuracy, and it was this model that was applied to the final test set.  
+  
+<br>
+    
+## Data Processing  
+  
+### Loading the Data
+The provided training and test data were loaded into R and confirmed to be of the appropriate size.
+```{r loading, cache=TRUE, hold=TRUE}
+traindata <- read.csv("pml-training.csv")
+testdata <- read.csv("pml-testing.csv")
+dim(traindata); dim(testdata)
+```  
+  
+<br>  
+  
+### Data Cleaning and Processing  
+A cursory examination of the data showed some columns that were obviously identifying metadata, as well as many columns that consisted almost entirely of missing data (NAs). These columns were removed from both the training and test sets.
+```{r cleaning, cache=TRUE, hold=TRUE}
+keepcols <- c(8:11, 37:49, 60:68, 84:86, 102, 113:124, 151:160)
+traindata <- traindata[ , keepcols]
+testdata <- testdata[  , keepcols]
+dim(traindata); dim(testdata)
+```
+The training data was then randomly split into a primary training set (70%) and a separate hold-out set (30%) for further cross-validation.
+```{r splitting, message=FALSE, hold=TRUE}
+require(caret)
+set.seed(24601)
+inTrain <- createDataPartition(y=traindata$classe, p=0.70, list=FALSE)
+trainset <- traindata[ inTrain, ]
+holdoutset  <- traindata[ -inTrain, ]
+dim(trainset); dim(holdoutset)
+```  
+<br>  
+  
+### Determining Principal Components
+Additional versions of the test and hold-out sets were created using Principal Component Analysis to indentify the linear combinations of variables responsible for most of the variation (95% by default) in the training data. These will be used with various models to see if the results are any better than models created using the unprocessed data.
+```{r pca, cache=TRUE, hold=TRUE}
+# The 52nd column is our outcome variable. We do not include it in the PCA preprocessing.
+pca.preprocessor <- preProcess(trainset[ , -52], method="pca")
+trainset.pca <- predict(pca.preprocessor, newdata=trainset[ , -52])
+holdoutset.pca <- predict(pca.preprocessor, newdata=holdoutset[ , -52])
+dim(trainset.pca); dim(holdoutset.pca)
+```
+We can see that the first 24 principal components are indeed responsible for 95% of the variance:
+```{r pcaplot, fig.width=11, fig.height=5, echo=FALSE}
+par(cex=0.8)
+barplot(pca.preprocessor$trace, names.arg=1:length(pca.preprocessor$trace),
+        cex.names=.6, col="lightblue", xlab="Principal Component #",
+        ylab="Cumulative Variance Explained")
+abline(h=0.95, col="darkgreen", lwd=2)
+text(3, 0.98, "95% Level", col="darkgreen")
+```
+  
+<br>
+    
+## Model Building and Comparison
+  
+Several models were tried, both with and without PCA. The `train()` function from the **caret** package was used, which automatically cycles through an appropriate set of tuning parameters and estimates out-of-sample accuracy for each configuration using multiple copies of a bootstrapped data set.  
+  
+The best accuracy levels for each model type were as follows:
+```{r model_setup, echo=FALSE}
+# Create table to hold our results
+results <- data.frame(model=c("Single Tree (rpart)", "Single Tree (rpart) PCA",
+                              "K-Nearest Neighbors", "K-Nearest Neighbors PCA",
+                              "Linear DA", "Linear DA PCA",
+                              "Quadratic DA", "Quadratic DA PCA",
+                              "Random Forest", "Random Forest PCA",
+                              "Stoch Gradient Boosting", "Stoch Grad Boosting PCA"),
+                      accuracy=rep(NA, 12))
+
+# Set up a train control for five rounds of bootstrapped cross-validation
+# (Rather than the default 25 rounds. Since we're still going to compare
+# our winning model to the hold-out set, five rounds should be fine.)
+tcon <- trainControl(number=5)
+
+```
+```{r model_tree, echo=FALSE, cache=TRUE, message=FALSE}
+# Classification Tree
+fit1 <- train(classe ~ ., data=trainset, method="rpart", trControl=tcon)
+results[1, 2] <- round(max(fit1$results[ ,2]), 3)
+# ...with PCA
+fit2 <- train(trainset$classe ~ ., data=trainset.pca, method="rpart", trControl=tcon)
+results[2, 2] <- round(max(fit2$results[ ,2]), 3)
+```
+```{r model_knn, echo=FALSE, cache=TRUE, message=FALSE}
+# KNN
+scaler <- preProcess(trainset[ , -52], method=c("center", "scale"))
+trainset.scaled <- predict(scaler, trainset[ , -52])
+fit3 <- train(trainset$classe ~ ., data=trainset.scaled, method="knn", trControl=tcon)
+results[3, 2] <- round(max(fit3$results[ ,2]), 3)
+# ...with PCA
+fit4 <- train(trainset$classe ~ ., data=trainset.pca, method="knn", trControl=tcon)
+results[4, 2] <- round(max(fit4$results[ ,2]), 3)
+```
+```{r model_lda_and_qda, echo=FALSE, cache=TRUE, message=FALSE}
+# LDA
+fit5 <- train(trainset$classe ~ ., data=trainset.scaled, method="lda", trControl=tcon)
+results[5, 2] <- round(max(fit5$results[ ,2]), 3)
+# ...with PCA
+fit6 <- train(trainset$classe ~ ., data=trainset.pca, method="lda", trControl=tcon)
+results[6, 2] <- round(max(fit6$results[ ,2]), 3)
+
+# QDA
+fit7 <- train(trainset$classe ~ ., data=trainset.scaled, method="qda", trControl=tcon)
+results[7, 2] <- round(max(fit7$results[ ,2]), 3)
+# ...with PCA
+fit8 <- train(trainset$classe ~ ., data=trainset.pca, method="qda", trControl=tcon)
+results[8, 2] <- round(max(fit8$results[ ,2]), 3)
+```
+```{r model_rf, echo=FALSE, cache=TRUE, message=FALSE}
+# Random Forest
+# Default mtry for randomForest is sqrt(ncol(data))
+# We'll only try that value in our search grid...
+customGrid <- data.frame(mtry=floor(sqrt(ncol(trainset[ ,-52]))))
+set.seed(8675309)
+fit9 <- train(classe ~ ., data=trainset, method="rf",
+              tuneGrid=customGrid, trControl=tcon)
+results[9, 2] <- round(max(fit9$results[ ,2]), 3)
+# ...with PCA
+set.seed(5882300)
+fit10 <- train(trainset$classe ~ ., data=trainset.pca, method="rf",
+               tuneGrid=customGrid, trControl=tcon)
+results[10, 2] <- round(max(fit10$results[ ,2]), 3)
+```
+```{r model_boost, echo=FALSE, cache=TRUE, message=FALSE}
+# We first modify the search grid to look at fewer combinations
+# of larger parameter values. This seems to give slightly better
+# results in less time.
+customGrid <- expand.grid(interaction.depth=4:5,
+                          n.trees=c(200, 250),
+                          shrinkage=0.1, n.minobsinnode=10)
+set.seed(42)
+fit11 <- train(classe ~ ., data=trainset, method="gbm",
+               tuneGrid=customGrid, trControl=tcon, verbose=FALSE)
+results[11, 2] <- round(max(fit11$results[ ,5]), 3)
+# ...with PCA
+set.seed(007)
+fit12 <- train(trainset$classe ~ ., data=trainset.pca, method="gbm",
+               tuneGrid=customGrid, trControl=tcon, verbose=FALSE)
+results[12, 2] <- round(max(fit12$results[ ,5]), 3)
+```
+```{r show_results, echo=FALSE, fig.width=10, fig.height=6}
+# Plot results. First sort results by accuracy...
+results <- results[order(results$accuracy), ]
+# Give the label text enough room and set it to draw horizontally
+par(mar=c(5,12,4,2)+0.1, las=1, cex=0.8)
+# Draw a "barless" bar plot
+barplot(rep(0, nrow(results)), names.arg=results$model,
+        xlim=c(0,1), main="Model Comparison", horiz=TRUE,
+        xlab="Bootstrapped Accuracy Estimate")
+# Add vertical guidelines
+abline(v=seq(0, 1, 0.2), col=rgb(0, 0, 0, 0.2), lwd=1)
+# Plot the actual bars on top of everything else
+barplot(results$accuracy, names.arg=results$model, horiz=TRUE,
+        col="cadetblue4", border=NA, add=TRUE)
+# Add text to show actual accuracy values
+text(0.03, seq(0.8, 14, length.out=12),
+     format(results$accuracy, nsmall=3), col="white")
+# Save the "winning" model to the fit variable, for later...
+fit <- fit9
+```
+  
+<br>
+    
+## Evaluating the Winning Model
+  
+The highest bootstrapped accuracy (`r results$accuracy[nrow(results)]`) was obtained with the **Random Forest** algorithm applied to the raw (non-PCA) data.  
+  
+By default, caret's train function will cycle through several different values of the `mtry` parameter (indicating the number of features to randomly select for each tree in the forest). In practice, there was found to be little difference in estimated accuracy among the various values. For speed, we fixed the `mtry` parameter to approximately the square root of the number of features, which is the default behavior for the `randomForest()` function.
+
+The estimated accuracy was determined by applying the model to five bootstrapped sample sets.  
+  
+```{r redisplay_winner, eval=FALSE}
+customGrid <- data.frame(mtry=floor(sqrt(ncol(trainset[ ,-52]))))
+tcon <- trainControl(number=5)
+set.seed(8675309)
+fit <- train(classe ~ ., data=trainset, method="rf",
+             tuneGrid=customGrid, trControl=tcon)
+```
+```{r print_winner}
+fit
+```  
+  
+Our final estimate of expected out-of-sample accuracy is determine by applying our model to the held-out cross-validation set. We then compare the predicted outcomes to the actual outcomes.  
+  
+```{r loadrf, echo=FALSE, message=FALSE, warnings=FALSE}
+require(randomForest)
+```
+```{r holdout_predict, messages=FALSE}
+holdoutpred <- predict(fit, holdoutset)
+cm <- confusionMatrix(holdoutpred, holdoutset$classe)
+cm$table
+data.frame(value=round(cm$overall, 3))
+```  
+  
+The expected out-of-sample accuracy found with the hold-out set is `r round(cm$overall[1], 3)`, even slightly better than the previous estimate of `r results$accuracy[nrow(results)]` found via bootstrapping.  
+  
+<br>
+  
+## Prediction  
+  
+The random forest model was finally applied to the provided test data and a vector of predicted `classe` values was obtained.  
+  
+```{r prediction}
+answers <- as.character(predict(fit, testdata))
+answers
+```  
+  
+  <br>
+
